@@ -46,7 +46,7 @@ AVAILABLE ACTIONS:
 
 AVAILABLE ZAPIER MCP TOOLS:
 1. google_calendar_find_event: Find/list calendar events
-   Parameters: {{"instructions": "description", "start_time": "ISO", "end_time": "ISO", "max_results": "10"}}
+   Parameters: {{"instructions": "description", "max_results": "10"}}
 
 2. google_calendar_quick_add_event: Create event from natural language
    Parameters: {{"instructions": "description", "text": "natural language event"}}
@@ -60,10 +60,19 @@ AVAILABLE ZAPIER MCP TOOLS:
 PARSING RULES:
 - Convert relative dates to absolute ISO timestamps (UTC with Z suffix)
 - Default meeting duration is 1 hour if not specified
-- For "today" use full day range (00:00:00Z to 23:59:59Z)
-- For "tomorrow" use full day range for next day
+- For "today" use current day range (00:00:00Z to 23:59:59Z)
+- For "tomorrow" use next day range
+- For "this week" use current week range
 - Extract emails, names, locations, times carefully
 - Always include clear "instructions" parameter
+- Be generous with date ranges - if user says "today" include full day
+- If no time specified, use reasonable defaults
+
+EXAMPLES:
+- "What's on my calendar today?" → find_events with today's full range
+- "Show me my meetings tomorrow" → find_events with tomorrow's range
+- "Schedule a meeting with John at 2pm" → create_event
+- "Am I free this afternoon?" → check_availability
 
 RESPONSE FORMAT - Return ONLY this JSON structure:
 {{
@@ -91,6 +100,12 @@ Now analyze this user input:"""
             
             ai_response = response.choices[0].message.content.strip()
             
+            # Clean up the response - remove any markdown formatting
+            if ai_response.startswith('```json'):
+                ai_response = ai_response[7:-3].strip()
+            elif ai_response.startswith('```'):
+                ai_response = ai_response[3:-3].strip()
+            
             try:
                 result = json.loads(ai_response)
                 return {
@@ -102,10 +117,12 @@ Now analyze this user input:"""
                     "reasoning": result.get("reasoning", ""),
                     "raw_ai_response": ai_response
                 }
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                print(f"JSON Parse Error: {e}")
+                print(f"AI Response: {ai_response}")
                 return {
                     "success": False,
-                    "error": "AI returned invalid JSON",
+                    "error": f"AI returned invalid JSON: {e}",
                     "raw_ai_response": ai_response
                 }
                 
@@ -165,22 +182,31 @@ class ZapierAIAgent:
                 tools = await self.mcp_client.list_tools()
                 self.console.print(f"[green]✓ Found {len(tools)} total tools[/green]")
 
+                # Show actual tool names
+                calendar_tools = [tool for tool in tools if 'calendar' in tool.name.lower()]
                 tools_panel = Panel(
-                    "\n".join([f"• {tool.name}: {tool.description}" for tool in tools[:10]]) +
-                    (f"\n... and {len(tools) - 10} more tools" if len(tools) > 10 else ""),
+                    "\n".join([f"• {tool.name}: {tool.description}" for tool in calendar_tools[:10]]) +
+                    (f"\n... and {len(calendar_tools) - 10} more calendar tools" if len(calendar_tools) > 10 else ""),
                     title="Available Google Calendar Tools",
                     border_style="green"
                 )
                 self.console.print(tools_panel)
 
-                # Test calendar access
+                # Test calendar access with simpler parameters
                 self.console.print("[blue]🔍 Testing calendar access...[/blue]")
                 try:
-                    result = await self.mcp_client.call_tool("google_calendar_find_event", {
-                        "instructions": "Find my calendar events for today"
-                    })
-                    self.console.print("[green]✓ Calendar access successful![/green]")
-                    return True
+                    # Try the actual tool name that exists
+                    calendar_tool = next((tool for tool in tools if 'find_event' in tool.name.lower() or 'calendar' in tool.name.lower()), None)
+                    if calendar_tool:
+                        self.console.print(f"[blue]Testing tool: {calendar_tool.name}[/blue]")
+                        result = await self.mcp_client.call_tool(calendar_tool.name, {
+                            "instructions": "Find my calendar events for today"
+                        })
+                        self.console.print("[green]✓ Calendar access successful![/green]")
+                        return True
+                    else:
+                        self.console.print("[yellow]No calendar find tool found[/yellow]")
+                        return False
                 except Exception as tool_error:
                     self.console.print(f"[red]❌ Calendar access failed: {tool_error}[/red]")
                     return False
@@ -210,11 +236,12 @@ class ZapierAIAgent:
                     for tool in tools
                 ]
 
-                self.console.print(f"[green]✓ Found {len(self.available_tools)} Google Calendar tools[/green]")
+                self.console.print(f"[green]✓ Found {len(self.available_tools)} total tools[/green]")
 
-                key_tools = [tool['name'] for tool in self.available_tools[:5]]
-                if key_tools:
-                    self.console.print(f"[blue]Key tools: {', '.join(key_tools)}[/blue]")
+                # Show calendar-specific tools
+                calendar_tools = [tool for tool in self.available_tools if 'calendar' in tool['name'].lower()]
+                if calendar_tools:
+                    self.console.print(f"[blue]Calendar tools: {', '.join([t['name'] for t in calendar_tools[:5]])}[/blue]")
 
                 return True
 
@@ -228,7 +255,7 @@ class ZapierAIAgent:
             return False
 
     async def execute_tool(self, tool_name, parameters=None):
-        """Execute a tool via MCP"""
+        """Execute a tool via MCP with better error handling"""
         if not self.mcp_client:
             return {"error": "MCP client not initialized"}
 
@@ -241,11 +268,76 @@ class ZapierAIAgent:
                 if "instructions" not in parameters:
                     parameters["instructions"] = f"Execute {tool_name}"
                 
+                self.console.print(f"[blue]Executing tool: {tool_name}[/blue]")
+                self.console.print(f"[dim]Parameters: {json.dumps(parameters, indent=2)}[/dim]")
+                
                 result = await self.mcp_client.call_tool(tool_name, parameters)
+                
+                '''if result.content and len(result.content) > 0:
+                    content_item = result.content[0]
+                    if hasattr(content_item, "text"):
+                        events_result = json.loads(content_item.text)
+                        print(json.dumps(events_result, indent=2))
+
+                        # If we found events, try to retrieve the first one by ID
+                        if (
+                            isinstance(events_result, dict)
+                            and "items" in events_result
+                            and events_result["items"]
+                        ):
+                            first_event = events_result["items"][0]
+                            if "id" in first_event:
+                                event_id = first_event["id"]
+                                print(f"\nRetrieving event details for ID: {event_id}")
+
+                                # Now call retrieve_event_by_id with a real event ID
+                                result = await self.mcp_client.call_tool(
+                                    "google_calendar_retrieve_event_by_id",
+                                    {
+                                        "instructions": "Execute the Google Calendar: Retrieve Event by ID tool with the following parameters",
+                                        "event_id": event_id,
+                                    },
+                                )
+
+                                # Parse and display the specific event details
+                                if result.content and len(result.content) > 0:
+                                    content_item = result.content[0]
+                                    if hasattr(content_item, "text"):
+                                        json_result = json.loads(content_item.text)
+                                        print(
+                                            f"\nEvent details:\n{json.dumps(json_result, indent=2)}"
+                                        )
+                                    else:
+                                        print(f"\nResult content: {content_item}")
+                                else:
+                                    print(f"\nResult: {result}")
+                            else:
+                                print("No event ID found in the first event")
+                        else:
+                            print("No events found or unexpected response format")
+                    else:
+                        print(f"Find events result: {content_item}")
+                else:
+                    print(f"Find events result: {result}")'''
+
+                if result.content and len(result.content) > 0:
+                    content_item = result.content[0]
+                    if hasattr(content_item, "text"):
+                        json_result = json.loads(content_item.text)
+                        print(
+                            f"\nEvent details:\n{json.dumps(json_result, indent=2)}"
+                        )
+                    else:
+                        print(f"\nResult content: {content_item}")
+                else:
+                    print(f"\nResult: {result}")
 
                 if result and hasattr(result, 'content') and len(result.content) > 0:
                     content = result.content[0]
                     text_result = content.text if hasattr(content, 'text') else str(content)
+                    
+                    self.console.print(f"[green]✓ Tool executed successfully[/green]")
+                    self.console.print(f"[dim]Raw result: {text_result[:200]}...[/dim]")
                     
                     try:
                         return json.loads(text_result)
@@ -255,23 +347,36 @@ class ZapierAIAgent:
                     return {"error": "No result returned from tool"}
 
         except Exception as e:
-            self.console.print(f"[yellow]Tool execution failed, using simulated data: {e}[/yellow]")
-            # Return simulated responses for development
-            if tool_name == "google_calendar_find_event":
+            self.console.print(f"[red]❌ Tool execution failed: {e}[/red]")
+            
+            # Return more realistic simulated responses for development
+            if "find_event" in tool_name.lower():
                 return {
                     "events": [
-                        {"summary": "Team Meeting", "start": {"dateTime": "2025-07-08T14:00:00Z"}},
-                        {"summary": "Project Review", "start": {"dateTime": "2025-07-08T16:00:00Z"}},
-                        {"summary": "1:1 with Manager", "start": {"dateTime": "2025-07-09T10:00:00Z"}}
+                        {
+                            "summary": "Team Meeting", 
+                            "start": {"dateTime": "2025-07-08T14:00:00Z"},
+                            "end": {"dateTime": "2025-07-08T15:00:00Z"}
+                        },
+                        {
+                            "summary": "Project Review", 
+                            "start": {"dateTime": "2025-07-08T16:00:00Z"},
+                            "end": {"dateTime": "2025-07-08T17:00:00Z"}
+                        },
+                        {
+                            "summary": "1:1 with Manager", 
+                            "start": {"dateTime": "2025-07-09T10:00:00Z"},
+                            "end": {"dateTime": "2025-07-09T11:00:00Z"}
+                        }
                     ]
                 }
-            elif tool_name == "google_calendar_quick_add_event":
+            elif "quick_add" in tool_name.lower() or "create" in tool_name.lower():
                 return {"success": True, "event_id": "created_event_123", "message": "Event created successfully"}
             else:
                 return {"error": str(e)}
 
     async def get_ai_response(self, user_message):
-        """Enhanced AI response with AI-only intent analysis"""
+        """Enhanced AI response with improved intent analysis"""
         try:
             # Step 1: Use AI to analyze intent and generate MCP parameters
             intent_result = None
@@ -283,6 +388,14 @@ class ZapierAIAgent:
                     self.console.print(f"[green]✓ Intent: {intent_result['action']} (confidence: {intent_result['confidence']})[/green]")
                     if intent_result.get("reasoning"):
                         self.console.print(f"[dim]Reasoning: {intent_result['reasoning']}[/dim]")
+                    
+                    # Debug: Show generated parameters
+                    if intent_result.get("parameters"):
+                        self.console.print(f"[dim]Generated parameters: {json.dumps(intent_result['parameters'], indent=2)}[/dim]")
+                else:
+                    self.console.print(f"[red]❌ Intent analysis failed: {intent_result.get('error', 'Unknown error')}[/red]")
+                    if intent_result.get("raw_ai_response"):
+                        self.console.print(f"[dim]Raw AI response: {intent_result['raw_ai_response'][:300]}...[/dim]")
             
             # Step 2: Get conversation history for context
             chat_history = self.memory.chat_memory.messages
@@ -358,11 +471,13 @@ INSTRUCTIONS:
                 tool_type = intent_result["tool_type"]
                 parameters = intent_result["parameters"]
                 
+                self.console.print(f"[blue]🔧 Executing action: {action} with tool: {tool_type}[/blue]")
+                
                 if action == "find_events":
                     self.console.print("[blue]🔍 Searching your calendar...[/blue]")
                     tool_result = await self.execute_tool(tool_type, parameters)
                     
-                    if 'events' in tool_result:
+                    if 'events' in tool_result and tool_result['events']:
                         # Store events in context for future reference
                         self.calendar_context["last_searched_events"] = tool_result['events']
                         self.calendar_context["last_search_time"] = datetime.now().isoformat()
@@ -375,6 +490,10 @@ INSTRUCTIONS:
                         
                         if len(tool_result['events']) > 10:
                             ai_response += f"\n\n(Showing first 10 of {len(tool_result['events'])} events)"
+                    elif 'events' in tool_result and not tool_result['events']:
+                        ai_response += "\n\n📅 No events found for the specified time period."
+                    else:
+                        ai_response += f"\n\n❌ Failed to retrieve calendar events: {tool_result.get('error', 'Unknown error')}"
 
                 elif action == "create_event":
                     self.console.print("[blue]📅 Creating calendar event...[/blue]")
@@ -398,6 +517,8 @@ INSTRUCTIONS:
                             ai_response += f"\n\nYour busy periods:\n{busy_text}"
                         else:
                             ai_response += "\n\n✅ You appear to be free during this time!"
+                    else:
+                        ai_response += f"\n\n❌ Failed to check availability: {tool_result.get('error', 'Unknown error')}"
 
             # Step 7: Store conversation in memory
             self.memory.chat_memory.add_user_message(user_message)
@@ -405,6 +526,7 @@ INSTRUCTIONS:
 
             return ai_response
         except Exception as e:
+            self.console.print(f"[red]❌ Error in get_ai_response: {e}[/red]")
             return f"Sorry, I encountered an error: {str(e)}"
 
     async def show_available_tools(self):
@@ -467,7 +589,23 @@ INSTRUCTIONS:
         self.console.print("Type 'quit' or 'exit' to end the conversation.")
         self.console.print("Type 'test' to run connection diagnostics.")
         self.console.print("Type 'tools' to see available calendar tools.")
-        self.console.print("Type 'memory' to see conversation history.\n")
+        self.console.print("Type 'memory' to see conversation history.")
+        self.console.print("Type 'debug [message]' to see intent analysis without executing.\n")
+
+    async def debug_intent(self, user_message):
+        """Debug intent analysis without executing tools"""
+        if not self.intent_analyzer:
+            self.console.print("[red]Intent analyzer not initialized[/red]")
+            return
+        
+        intent_result = await self.intent_analyzer.analyze_intent(user_message)
+        
+        debug_panel = Panel(
+            json.dumps(intent_result, indent=2),
+            title="Intent Analysis Debug",
+            border_style="yellow"
+        )
+        self.console.print(debug_panel)
 
     async def run(self):
         """Main chat loop"""
@@ -485,6 +623,12 @@ INSTRUCTIONS:
             try:
                 # Get user input
                 user_input = Prompt.ask("\n[green]You[/green]")
+
+                # Check for debug command
+                if user_input.lower().startswith('debug '):
+                    debug_message = user_input[6:].strip()
+                    await self.debug_intent(debug_message)
+                    continue
 
                 # Check for special diagnostic commands
                 if user_input.lower() in ['test', 'test connection', 'diagnostics', 'debug']:
@@ -525,3 +669,4 @@ INSTRUCTIONS:
 if __name__ == "__main__":
     agent = ZapierAIAgent()
     asyncio.run(agent.run())
+
