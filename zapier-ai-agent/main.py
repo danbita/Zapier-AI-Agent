@@ -1,7 +1,7 @@
 import os
 import json
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.prompt import Prompt
@@ -26,8 +26,12 @@ class AICalendarIntentAnalyzer:
     async def analyze_intent(self, user_input: str) -> dict:
         """Use AI to analyze user input and generate MCP parameters"""
         try:
-            now = datetime.now()
-            current_context = f"Current date and time: {now.strftime('%Y-%m-%d %H:%M:%S %A')}"
+            now = datetime.now(timezone.utc)
+            # Convert to your local timezone (Pacific Time)
+            pacific_tz = timezone(timedelta(hours=-7))  # PDT (UTC-7)
+            local_now = now.astimezone(pacific_tz)
+            
+            current_context = f"Current date and time: {local_now.strftime('%Y-%m-%d %H:%M:%S %A')} (Pacific Time)"
             
             system_prompt = f"""You are an AI assistant that analyzes user calendar requests and returns structured data.
 
@@ -58,19 +62,15 @@ AVAILABLE ZAPIER MCP TOOLS:
    Parameters: {{"instructions": "description", "start_time": "ISO", "end_time": "ISO"}}
 
 PARSING RULES:
-- Convert relative dates to absolute ISO timestamps (UTC with Z suffix)
-- Default meeting duration is 1 hour if not specified
-- For "today" use current day range (00:00:00Z to 23:59:59Z)
-- For "tomorrow" use next day range
-- For "this week" use current week range
-- Extract emails, names, locations, times carefully
+- For calendar searches, use simple instructions describing what to find
+- Default max_results to 5-10 events
+- Use natural language in instructions rather than complex parameters
 - Always include clear "instructions" parameter
-- Be generous with date ranges - if user says "today" include full day
-- If no time specified, use reasonable defaults
+- For date filtering, include date context in the instructions text
 
 EXAMPLES:
-- "What's on my calendar today?" → find_events with today's full range
-- "Show me my meetings tomorrow" → find_events with tomorrow's range
+- "What's on my calendar today?" → find_events with "Find events for today" instruction
+- "Show me my meetings tomorrow" → find_events with "Find meetings for tomorrow" instruction
 - "Schedule a meeting with John at 2pm" → create_event
 - "Am I free this afternoon?" → check_availability
 
@@ -272,65 +272,6 @@ class ZapierAIAgent:
                 self.console.print(f"[dim]Parameters: {json.dumps(parameters, indent=2)}[/dim]")
                 
                 result = await self.mcp_client.call_tool(tool_name, parameters)
-                
-                '''if result.content and len(result.content) > 0:
-                    content_item = result.content[0]
-                    if hasattr(content_item, "text"):
-                        events_result = json.loads(content_item.text)
-                        print(json.dumps(events_result, indent=2))
-
-                        # If we found events, try to retrieve the first one by ID
-                        if (
-                            isinstance(events_result, dict)
-                            and "items" in events_result
-                            and events_result["items"]
-                        ):
-                            first_event = events_result["items"][0]
-                            if "id" in first_event:
-                                event_id = first_event["id"]
-                                print(f"\nRetrieving event details for ID: {event_id}")
-
-                                # Now call retrieve_event_by_id with a real event ID
-                                result = await self.mcp_client.call_tool(
-                                    "google_calendar_retrieve_event_by_id",
-                                    {
-                                        "instructions": "Execute the Google Calendar: Retrieve Event by ID tool with the following parameters",
-                                        "event_id": event_id,
-                                    },
-                                )
-
-                                # Parse and display the specific event details
-                                if result.content and len(result.content) > 0:
-                                    content_item = result.content[0]
-                                    if hasattr(content_item, "text"):
-                                        json_result = json.loads(content_item.text)
-                                        print(
-                                            f"\nEvent details:\n{json.dumps(json_result, indent=2)}"
-                                        )
-                                    else:
-                                        print(f"\nResult content: {content_item}")
-                                else:
-                                    print(f"\nResult: {result}")
-                            else:
-                                print("No event ID found in the first event")
-                        else:
-                            print("No events found or unexpected response format")
-                    else:
-                        print(f"Find events result: {content_item}")
-                else:
-                    print(f"Find events result: {result}")'''
-
-                if result.content and len(result.content) > 0:
-                    content_item = result.content[0]
-                    if hasattr(content_item, "text"):
-                        json_result = json.loads(content_item.text)
-                        print(
-                            f"\nEvent details:\n{json.dumps(json_result, indent=2)}"
-                        )
-                    else:
-                        print(f"\nResult content: {content_item}")
-                else:
-                    print(f"\nResult: {result}")
 
                 if result and hasattr(result, 'content') and len(result.content) > 0:
                     content = result.content[0]
@@ -352,26 +293,87 @@ class ZapierAIAgent:
             # Return more realistic simulated responses for development
             if "find_event" in tool_name.lower():
                 return {
-                    "events": [
+                    "results": [  # Changed from "events" to "results" to match Zapier format
                         {
                             "summary": "Team Meeting", 
-                            "start": {"dateTime": "2025-07-08T14:00:00Z"},
-                            "end": {"dateTime": "2025-07-08T15:00:00Z"}
+                            "start": {
+                                "dateTime": "2025-07-08T14:00:00Z",
+                                "dateTime_pretty": "Jul 08, 2025 02:00PM",
+                                "time_pretty": "02:00PM"
+                            },
+                            "duration_hours": 1,
+                            "duration_minutes": 60,
+                            "attendee_emails": "john@example.com,jane@example.com"
                         },
                         {
                             "summary": "Project Review", 
-                            "start": {"dateTime": "2025-07-08T16:00:00Z"},
-                            "end": {"dateTime": "2025-07-08T17:00:00Z"}
+                            "start": {
+                                "dateTime": "2025-07-08T16:00:00Z",
+                                "dateTime_pretty": "Jul 08, 2025 04:00PM", 
+                                "time_pretty": "04:00PM"
+                            },
+                            "duration_hours": 0.5,
+                            "duration_minutes": 30,
+                            "attendee_emails": ""
                         },
                         {
                             "summary": "1:1 with Manager", 
-                            "start": {"dateTime": "2025-07-09T10:00:00Z"},
-                            "end": {"dateTime": "2025-07-09T11:00:00Z"}
+                            "start": {
+                                "dateTime": "2025-07-09T10:00:00Z",
+                                "dateTime_pretty": "Jul 09, 2025 10:00AM",
+                                "time_pretty": "10:00AM"
+                            },
+                            "duration_hours": 1,
+                            "duration_minutes": 60,
+                            "attendee_emails": ""
                         }
                     ]
                 }
             elif "quick_add" in tool_name.lower() or "create" in tool_name.lower():
-                return {"success": True, "event_id": "created_event_123", "message": "Event created successfully"}
+                return {
+                    "results": [{
+                        "kind": "calendar#event",
+                        "id": "created_event_123",
+                        "status": "confirmed",
+                        "summary": "New Meeting",
+                        "htmlLink": "https://www.google.com/calendar/event?eid=example",
+                        "start": {
+                            "dateTime": "2025-07-10T15:00:00-07:00",
+                            "dateTime_pretty": "Jul 10, 2025 03:00PM",
+                            "time_pretty": "03:00PM"
+                        },
+                        "duration_hours": 1,
+                        "duration_minutes": 60
+                    }]
+                }
+            elif "busy_periods" in tool_name.lower() or "availability" in tool_name.lower():
+                # Simulated busy periods response
+                return {
+                    "results": [
+                        {
+                            "summary": "Team Meeting",
+                            "start": {
+                                "dateTime": "2025-07-10T14:00:00-07:00",
+                                "dateTime_pretty": "Jul 10, 2025 02:00PM"
+                            },
+                            "end": {
+                                "dateTime": "2025-07-10T15:00:00-07:00", 
+                                "dateTime_pretty": "Jul 10, 2025 03:00PM"
+                            }
+                        },
+                        {
+                            "summary": "Client Call",
+                            "start": {
+                                "dateTime": "2025-07-10T16:30:00-07:00",
+                                "dateTime_pretty": "Jul 10, 2025 04:30PM"
+                            },
+                            "end": {
+                                "dateTime": "2025-07-10T17:00:00-07:00",
+                                "dateTime_pretty": "Jul 10, 2025 05:00PM"
+                            }
+                        }
+                    ]
+                }
             else:
                 return {"error": str(e)}
 
@@ -477,29 +479,100 @@ INSTRUCTIONS:
                     self.console.print("[blue]🔍 Searching your calendar...[/blue]")
                     tool_result = await self.execute_tool(tool_type, parameters)
                     
-                    if 'events' in tool_result and tool_result['events']:
+                    # Check for both 'results' and 'events' arrays (Zapier uses 'results')
+                    events_list = tool_result.get('results') or tool_result.get('events', [])
+                    
+                    if events_list:
                         # Store events in context for future reference
-                        self.calendar_context["last_searched_events"] = tool_result['events']
+                        self.calendar_context["last_searched_events"] = events_list
                         self.calendar_context["last_search_time"] = datetime.now().isoformat()
                         
-                        events_text = "\n".join([
-                            f"- {event.get('summary', 'No title')} at {event.get('start', {}).get('dateTime', 'No time')}"
-                            for event in tool_result['events'][:10]
-                        ])
-                        ai_response += f"\n\nHere are your calendar events:\n{events_text}"
+                        # Format events with better time display
+                        events_text = []
+                        for event in events_list[:10]:
+                            title = event.get('summary', 'No title')
+                            
+                            # Get formatted time from the API response
+                            start_info = event.get('start', {})
+                            if 'dateTime_pretty' in start_info:
+                                time_str = start_info['dateTime_pretty']
+                            elif 'time_pretty' in start_info:
+                                date_str = start_info.get('date_pretty', '')
+                                time_str = f"{date_str} {start_info['time_pretty']}"
+                            elif 'dateTime' in start_info:
+                                time_str = start_info['dateTime']
+                            else:
+                                time_str = 'No time'
+                            
+                            # Add duration if available
+                            duration_hours = event.get('duration_hours', 0)
+                            duration_minutes = event.get('duration_minutes', 0)
+                            
+                            if duration_hours > 0:
+                                duration_str = f" ({duration_hours}h)"
+                            elif duration_minutes > 0:
+                                duration_str = f" ({duration_minutes}m)"
+                            else:
+                                duration_str = ""
+                            
+                            # Add attendee count if available
+                            attendee_emails = event.get('attendee_emails', '')
+                            if attendee_emails and attendee_emails.strip():
+                                attendee_count = len(attendee_emails.split(','))
+                                attendee_str = f" [{attendee_count} attendees]" if attendee_count > 1 else ""
+                            else:
+                                attendee_str = ""
+                            
+                            events_text.append(f"- **{title}** at {time_str}{duration_str}{attendee_str}")
                         
-                        if len(tool_result['events']) > 10:
-                            ai_response += f"\n\n(Showing first 10 of {len(tool_result['events'])} events)"
-                    elif 'events' in tool_result and not tool_result['events']:
-                        ai_response += "\n\n📅 No events found for the specified time period."
+                        ai_response += f"\n\n📅 **Your Calendar Events:**\n" + "\n".join(events_text)
+                        
+                        if len(events_list) > 10:
+                            ai_response += f"\n\n*(Showing first 10 of {len(events_list)} events)*"
+                        
+                        # Add summary statistics
+                        total_duration = sum(event.get('duration_minutes', 0) for event in events_list)
+                        if total_duration > 0:
+                            hours = total_duration // 60
+                            minutes = total_duration % 60
+                            ai_response += f"\n\n⏱️ **Total time:** {hours}h {minutes}m"
+                            
                     else:
-                        ai_response += f"\n\n❌ Failed to retrieve calendar events: {tool_result.get('error', 'Unknown error')}"
+                        ai_response += "\n\n📅 No events found for the specified time period."
 
                 elif action == "create_event":
                     self.console.print("[blue]📅 Creating calendar event...[/blue]")
                     tool_result = await self.execute_tool(tool_type, parameters)
                     
-                    if tool_result.get("success"):
+                    # Check for both 'results' and direct success response
+                    if 'results' in tool_result and tool_result['results']:
+                        created_event = tool_result['results'][0]  # Get first created event
+                        event_id = created_event.get('id', 'Unknown')
+                        event_title = created_event.get('summary', 'Untitled Event')
+                        
+                        # Get formatted time if available
+                        start_info = created_event.get('start', {})
+                        if 'dateTime_pretty' in start_info:
+                            time_str = start_info['dateTime_pretty']
+                        elif 'time_pretty' in start_info:
+                            date_str = start_info.get('date_pretty', '')
+                            time_str = f"{date_str} {start_info['time_pretty']}"
+                        elif 'dateTime' in start_info:
+                            time_str = start_info['dateTime']
+                        else:
+                            time_str = "at scheduled time"
+                        
+                        # Get HTML link for easy access
+                        html_link = created_event.get('htmlLink', '')
+                        link_text = f"\n🔗 [View in Calendar]({html_link})" if html_link else ""
+                        
+                        ai_response += f"\n\n✅ **Event created successfully!**\n"
+                        ai_response += f"📋 **Title:** {event_title}\n"
+                        ai_response += f"🕐 **Time:** {time_str}\n"
+                        ai_response += f"🆔 **Event ID:** {event_id}{link_text}"
+                        
+                    elif tool_result.get("success"):
+                        # Fallback for simple success response
                         ai_response += f"\n\n✅ Event created successfully! Event ID: {tool_result.get('event_id', 'Unknown')}"
                     else:
                         ai_response += f"\n\n❌ Failed to create event: {tool_result.get('error', 'Unknown error')}"
@@ -508,17 +581,47 @@ INSTRUCTIONS:
                     self.console.print("[blue]⏰ Checking your availability...[/blue]")
                     tool_result = await self.execute_tool(tool_type, parameters)
                     
-                    if 'busy_periods' in tool_result:
-                        if tool_result['busy_periods']:
-                            busy_text = "\n".join([
-                                f"- Busy from {period.get('start', 'Unknown')} to {period.get('end', 'Unknown')}"
-                                for period in tool_result['busy_periods']
-                            ])
-                            ai_response += f"\n\nYour busy periods:\n{busy_text}"
-                        else:
-                            ai_response += "\n\n✅ You appear to be free during this time!"
+                    # Check for both 'results' and 'busy_periods' arrays (Zapier might use different formats)
+                    busy_periods = tool_result.get('busy_periods', [])
+                    results = tool_result.get('results', [])
+                    
+                    # If results array exists, it might contain busy period information
+                    if results and not busy_periods:
+                        # Check if results contain busy period data
+                        busy_periods = results
+                    
+                    if busy_periods:
+                        # Format busy periods with better time display
+                        busy_text = []
+                        for period in busy_periods:
+                            # Handle different possible formats for busy periods
+                            start_time = period.get('start', period.get('start_time', 'Unknown'))
+                            end_time = period.get('end', period.get('end_time', 'Unknown'))
+                            
+                            # Try to format times nicely if they have pretty formats
+                            if isinstance(start_time, dict):
+                                start_str = start_time.get('dateTime_pretty', start_time.get('dateTime', str(start_time)))
+                            else:
+                                start_str = str(start_time)
+                                
+                            if isinstance(end_time, dict):
+                                end_str = end_time.get('dateTime_pretty', end_time.get('dateTime', str(end_time)))
+                            else:
+                                end_str = str(end_time)
+                            
+                            # Add event title if available
+                            event_title = period.get('summary', period.get('title', ''))
+                            title_str = f" ({event_title})" if event_title else ""
+                            
+                            busy_text.append(f"- Busy from {start_str} to {end_str}{title_str}")
+                        
+                        ai_response += f"\n\n⏰ **Your busy periods:**\n" + "\n".join(busy_text)
+                        
+                        # Add summary if multiple periods
+                        if len(busy_periods) > 1:
+                            ai_response += f"\n\n*(You have {len(busy_periods)} conflicting events)*"
                     else:
-                        ai_response += f"\n\n❌ Failed to check availability: {tool_result.get('error', 'Unknown error')}"
+                        ai_response += "\n\n✅ You appear to be free during this time!"
 
             # Step 7: Store conversation in memory
             self.memory.chat_memory.add_user_message(user_message)
@@ -669,4 +772,3 @@ INSTRUCTIONS:
 if __name__ == "__main__":
     agent = ZapierAIAgent()
     asyncio.run(agent.run())
-
